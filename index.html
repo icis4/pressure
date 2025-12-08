@@ -83,18 +83,6 @@
                     </div>
                 </div>
             </div>
-
-            <!-- Cards removed -->
-
-            <!-- Another row demonstrating nested columns -->
-            <div class="row mt-4">
-                <div class="col-lg-8">
-                    <div class="p-3 bg-light border rounded-3 mb-3">Main content (col-lg-8)</div>
-                </div>
-                <div class="col-lg-4">
-                    <div class="p-3 bg-light border rounded-3 mb-3">Sidebar (col-lg-4)</div>
-                </div>
-            </div>
         </div>
         <!-- Bootstrap JS (includes Popper) -->
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
@@ -170,12 +158,43 @@
                     if (timer) return;
                     t0 = Date.now();
                     timer = setInterval(addPoint, 1000);
+                    // Disable/enable buttons on connect and style Disconnect green
+                    const btnC = document.getElementById('btnConnect');
+                    const btnD = document.getElementById('btnDisconnect');
+                    if (btnC) {
+                        btnC.disabled = true;
+                        btnC.classList.add('disabled');
+                        // make Connect gray
+                        btnC.classList.remove('btn-success');
+                        btnC.classList.add('btn-secondary');
+                    }
+                    if (btnD) {
+                        btnD.disabled = false;
+                        btnD.classList.remove('disabled', 'btn-outline-secondary');
+                        btnD.classList.add('btn-success');
+                    }
                 }
 
                 function stopDemo() {
                     if (!timer) return;
                     clearInterval(timer);
                     timer = null;
+                    // Re-enable/disable buttons on disconnect and restore Disconnect style
+                    const btnC = document.getElementById('btnConnect');
+                    const btnD = document.getElementById('btnDisconnect');
+                    if (btnC) {
+                        btnC.disabled = false;
+                        btnC.classList.remove('disabled');
+                        // restore Connect to green
+                        btnC.classList.remove('btn-secondary');
+                        btnC.classList.add('btn-success');
+                    }
+                    if (btnD) {
+                        btnD.disabled = true;
+                        btnD.classList.add('disabled');
+                        btnD.classList.remove('btn-success');
+                        btnD.classList.add('btn-outline-secondary');
+                    }
                 }
 
                 // Hook up buttons
@@ -207,6 +226,22 @@
                 };
                 document.getElementById('btnConnect')?.addEventListener('click', updateBadge);
                 document.getElementById('btnDisconnect')?.addEventListener('click', updateBadge);
+                // Initialize button states based on timer
+                (function initButtons(){
+                    const btnC = document.getElementById('btnConnect');
+                    const btnD = document.getElementById('btnDisconnect');
+                    if (btnC) btnC.disabled = !!timer;
+                    if (btnC) {
+                        btnC.classList.remove('btn-success', 'btn-secondary');
+                        btnC.classList.add(timer ? 'btn-secondary' : 'btn-success');
+                    }
+                    if (btnD) {
+                        btnD.disabled = !timer;
+                        // Style based on connection state
+                        btnD.classList.remove('btn-success', 'btn-outline-secondary');
+                        btnD.classList.add(timer ? 'btn-success' : 'btn-outline-secondary');
+                    }
+                })();
                 updateBadge();
             })();
         </script>
