@@ -207,13 +207,8 @@
                         return;
                     }
                     try {
-                        // Prefer previously authorized ports for faster reconnects
-                        const ports = await navigator.serial.getPorts();
-                        if (ports && ports.length > 0) {
-                            port = ports[0];
-                        } else {
-                            port = await navigator.serial.requestPort();
-                        }
+                        // Always request a port fresh and open it
+                        port = await navigator.serial.requestPort();
                         await new Promise(r => setTimeout(r, 150));
                         await port.open({ baudRate: 9600 });
                         const textDecoder = new TextDecoderStream();
