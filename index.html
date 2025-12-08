@@ -38,10 +38,11 @@
 
         <div class="container py-4">
             <h1 class="display-5 fw-bold mb-3">Pressure</h1>
-            <!-- Control panel under title -->
+            <!-- Top Connect/Disconnect -->
             <div class="d-flex align-items-center gap-2 mb-3">
                 <button id="btnConnect" class="btn btn-success btn-sm">Connect</button>
-                <button id="btnDisconnect" class="btn btn-outline-secondary btn-sm">Disconnect</button>
+                <button id="btnDisconnect" class="btn btn-outline-secondary btn-sm" disabled>Disconnect</button>
+                <span id="idnInfo" class="ms-2 small text-muted"></span>
             </div>
             <!-- Panel + Chart row -->
             <div class="row mb-4">
@@ -54,7 +55,7 @@
                             <div class="vstack gap-2">
                                 <div class="d-flex align-items-center justify-content-between">
                                     <span class="fw-semibold">Connection</span>
-                                    <span id="connStatus" class="badge text-bg-secondary">Idle</span>
+                                    <span id="connStatus" class="badge text-bg-secondary">Disconnected</span>
                                 </div>
                                 <div class="d-flex align-items-center justify-content-between">
                                     <span class="fw-semibold">Rate</span>
@@ -70,6 +71,22 @@
                                 </div>
                                 <div>
                                     <button id="btnSeed" class="btn btn-outline-primary btn-sm">Seed 8 points</button>
+                                </div>
+                                <div class="d-flex align-items-center justify-content-between mt-2">
+                                    <span class="fw-semibold">Stats</span>
+                                    <span class="text-muted">
+                                        Min: <span id="statMin">–</span>
+                                        Max: <span id="statMax">–</span>
+                                        Avg: <span id="statAvg">–</span>
+                                    </span>
+                                </div>
+                                <div class="mt-2">
+                                    <button id="btnExportCsv" class="btn btn-outline-dark btn-sm">Export CSV</button>
+                                </div>
+                                <!-- Removed panel Connect/Disconnect; using top buttons -->
+                                <div class="mt-2 d-flex gap-2">
+                                    <button id="btnDemo" class="btn btn-primary btn-sm">Demo</button>
+                                    <button id="btnStop" class="btn btn-outline-secondary btn-sm" disabled>Stop</button>
                                 </div>
                             </div>
                         </div>
@@ -134,7 +151,7 @@
                     console.warn('Chart.js not loaded; demo will run without rendering.');
                 }
 
-                // Demo data stream
+                // Demo data stream (fallback)
                 let timer = null;
                 let t0 = Date.now();
                 const maxPoints = 50;
@@ -160,68 +177,233 @@
                         arr.shift();
                     }
                     if (chart) chart.update('none');
+                    updateStats();
                 }
 
                 function startDemo() {
                     if (timer) return;
                     t0 = Date.now();
                     timer = setInterval(addPoint, Math.max(50, Math.floor(1000 / pointsPerSecond)));
-                    // Disable/enable buttons on connect and style Disconnect green
-                    const btnC = document.getElementById('btnConnect');
-                    const btnD = document.getElementById('btnDisconnect');
-                    const btnSeed = document.getElementById('btnSeed');
-                    if (btnC) {
-                        btnC.disabled = true;
-                        btnC.classList.add('disabled');
-                        // make Connect gray
-                        btnC.classList.remove('btn-success');
-                        btnC.classList.add('btn-secondary');
-                    }
-                    if (btnD) {
-                        btnD.disabled = false;
-                        btnD.classList.remove('disabled', 'btn-outline-secondary');
-                        btnD.classList.add('btn-success');
-                    }
-                    if (btnSeed) {
-                        btnSeed.disabled = true;
-                        btnSeed.classList.add('disabled');
-                        btnSeed.classList.remove('btn-outline-primary');
-                        btnSeed.classList.add('btn-outline-secondary');
-                    }
+                    // Demo controls only; do not touch Connect/Disconnect
+                    // Leave Seed enabled during demo
                 }
 
                 function stopDemo() {
                     if (!timer) return;
                     clearInterval(timer);
                     timer = null;
-                    // Re-enable/disable buttons on disconnect and restore Disconnect style
-                    const btnC = document.getElementById('btnConnect');
-                    const btnD = document.getElementById('btnDisconnect');
-                    const btnSeed = document.getElementById('btnSeed');
-                    if (btnC) {
-                        btnC.disabled = false;
-                        btnC.classList.remove('disabled');
-                        // restore Connect to green
-                        btnC.classList.remove('btn-secondary');
-                        btnC.classList.add('btn-success');
+                    // Demo controls only; do not touch Connect/Disconnect
+                    // Leave Seed enabled during demo
+                }
+
+                // USB CDC via Web Serial API
+                let port = null;
+                let reader = null;
+                let writer = null;
+                let inputStream = null;
+                async function connectSerial() {
+                    if (!('serial' in navigator)) {
+                        alert('Web Serial API not supported in this browser. Use Chrome/Edge.');
+                        return;
                     }
-                    if (btnD) {
-                        btnD.disabled = true;
-                        btnD.classList.add('disabled');
-                        btnD.classList.remove('btn-success');
-                        btnD.classList.add('btn-outline-secondary');
-                    }
-                    if (btnSeed) {
-                        btnSeed.disabled = false;
-                        btnSeed.classList.remove('disabled');
-                        btnSeed.classList.remove('btn-outline-secondary');
-                        btnSeed.classList.add('btn-outline-primary');
+                    try {
+                        // Prefer previously authorized ports for faster reconnects
+                        const ports = await navigator.serial.getPorts();
+                        if (ports && ports.length > 0) {
+                            port = ports[0];
+                        } else {
+                            port = await navigator.serial.requestPort();
+                        }
+                        await new Promise(r => setTimeout(r, 150));
+                        await port.open({ baudRate: 9600 });
+                        const textDecoder = new TextDecoderStream();
+                        port.readable.pipeTo(textDecoder.writable);
+                        inputStream = textDecoder.readable;
+                        const textEncoder = new TextEncoderStream();
+                        textEncoder.readable.pipeTo(port.writable);
+                        writer = textEncoder.writable.getWriter();
+                        // UI state
+                        const btnC = document.getElementById('btnConnect');
+                        const btnD = document.getElementById('btnDisconnect');
+                        if (btnC) { btnC.disabled = true; btnC.classList.add('disabled'); btnC.classList.remove('btn-success'); btnC.classList.add('btn-secondary'); }
+                        if (btnD) { btnD.disabled = false; btnD.classList.remove('disabled', 'btn-outline-secondary'); btnD.classList.add('btn-success'); }
+                        // Query ID and show it next to Disconnect BEFORE starting background read loop
+                        try {
+                            const lines = await scpi_command('*IDN?', { timeoutMs: 5000, idleMs: 500, terminatorRegex: /\s*\)>/ });
+                            const el = document.getElementById('idnInfo');
+                            if (el) el.textContent = Array.isArray(lines) ? lines.join(' | ') : String(lines);
+                        } catch (e) {
+                            console.debug('IDN query failed', e);
+                        }
+
+                        // Start background read loop
+                        reader = inputStream.getReader();
+                        let buffer = '';
+                        (async () => {
+                            try {
+                                while (port && reader) {
+                                    const { value, done } = await reader.read();
+                                    if (done) break;
+                                    if (value) {
+                                        buffer += value;
+                                        let idx;
+                                        while ((idx = buffer.indexOf('\n')) >= 0) {
+                                            const line = buffer.slice(0, idx).trim();
+                                            buffer = buffer.slice(idx + 1);
+                                            if (line) {
+                                                const val = parseFloat(line);
+                                                const elapsed = Math.floor((Date.now() - t0) / 1000);
+                                                const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+                                                const ss = String(elapsed % 60).padStart(2, '0');
+                                                const label = `${mm}:${ss}`;
+                                                data.labels.push(label);
+                                                data.datasets[0].data.push(isNaN(val) ? randPsi(data.datasets[0].data.at(-1)) : val);
+                                                if (data.datasets[0].data.length > maxPoints) { data.labels.shift(); data.datasets[0].data.shift(); }
+                                                if (chart) chart.update('none');
+                                                updateStats();
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                // Swallow read errors during disconnect/cancel
+                            }
+                        })().catch(() => {});
+                    } catch (err) {
+                        console.error('Serial connect error', err);
+                        alert('Failed to connect to serial device.');
                     }
                 }
 
-                // Hook up buttons
-                document.getElementById('btnConnect')?.addEventListener('click', startDemo);
-                document.getElementById('btnDisconnect')?.addEventListener('click', stopDemo);
+                async function disconnectSerial() {
+                    try {
+                        if (reader) { await reader.cancel(); reader.releaseLock(); reader = null; }
+                        if (writer) {
+                            try { await writer.close(); } catch {}
+                            try { writer.releaseLock(); } catch {}
+                            writer = null;
+                        }
+                        // Small settle delay to allow underlying streams to tear down
+                        await new Promise(r => setTimeout(r, 200));
+                        if (port) { try { await port.close(); } catch {} port = null; }
+                        inputStream = null;
+                    } catch (err) {
+                        console.warn('Serial disconnect issue', err);
+                    } finally {
+                        const btnC = document.getElementById('btnConnect');
+                        const btnD = document.getElementById('btnDisconnect');
+                        const idn = document.getElementById('idnInfo');
+                        if (btnC) { btnC.disabled = false; btnC.classList.remove('disabled', 'btn-secondary'); btnC.classList.add('btn-success'); }
+                        if (btnD) { btnD.disabled = true; btnD.classList.add('disabled'); btnD.classList.remove('btn-success'); btnD.classList.add('btn-outline-secondary'); }
+                        if (idn) { idn.textContent = ''; }
+                    }
+                }
+
+                // Send SCPI command and read a multi-line response.
+                // Returns an array of lines. Uses idle timeout to detect end.
+                async function scpi_command(command, { timeoutMs = 3000, idleMs = 200, terminatorRegex = /\)>/ } = {}) {
+                    if (!port || !writer || !inputStream) {
+                        throw new Error('Serial port not connected');
+                    }
+                    // Pause background reader if active to avoid stream contention
+                    let hadBackgroundReader = !!reader;
+                    if (reader) {
+                        try { await reader.cancel(); } catch {}
+                        try { reader.releaseLock(); } catch {}
+                        reader = null;
+                    }
+
+                    // Write command + newline
+                    await writer.write(`${command}\n`);
+
+                    // Dedicated reader for response
+                    const tempReader = inputStream.getReader();
+                    let buffer = '';
+                    const lines = [];
+                    const start = Date.now();
+                    let lastDataTs = Date.now();
+                    try {
+                        while (Date.now() - start < timeoutMs) {
+                            const race = await Promise.race([
+                                tempReader.read(),
+                                new Promise(resolve => setTimeout(() => resolve({ value: null, done: false, idle: true }), 25))
+                            ]);
+                            const { value, done } = race;
+                            if (done) break;
+                            if (value) {
+                                buffer += value;
+                                lastDataTs = Date.now();
+                                let idx;
+                                while ((idx = buffer.indexOf('\n')) >= 0) {
+                                    const line = buffer.slice(0, idx).trimEnd();
+                                    buffer = buffer.slice(idx + 1);
+                                    const trimmed = line.trim();
+                                    if (trimmed.length) {
+                                        lines.push(trimmed);
+                                        if (terminatorRegex && terminatorRegex.test(trimmed)) {
+                                            return lines;
+                                        }
+                                    }
+                                }
+                            }
+                            // End if idle for idleMs
+                            if (Date.now() - lastDataTs >= idleMs && lines.length) {
+                                return lines;
+                            }
+                        }
+                        // If buffer has remaining content, flush last line
+                        const final = buffer.trim();
+                        if (final) lines.push(final);
+                        if (lines.length) return lines;
+                        throw new Error('Timeout waiting for response');
+                    } finally {
+                        try { tempReader.releaseLock(); } catch {}
+                        // Resume background reader if it was active, without chart/demo updates
+                        if (hadBackgroundReader && port) {
+                            try {
+                                reader = inputStream.getReader();
+                                (async () => {
+                                    try {
+                                        let bufferBg = '';
+                                        while (port && reader) {
+                                            const { value, done } = await reader.read();
+                                            if (done) break;
+                                            if (value) {
+                                                bufferBg += value;
+                                                let idx;
+                                                // Consume lines silently to keep stream flowing
+                                                while ((idx = bufferBg.indexOf('\n')) >= 0) {
+                                                    bufferBg = bufferBg.slice(idx + 1);
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        // Ignore during disconnect/cancel
+                                    }
+                                })().catch(() => {});
+                            } catch {}
+                        }
+                    }
+                }
+
+                // Hook up buttons (top bar)
+                document.getElementById('btnConnect')?.addEventListener('click', connectSerial);
+                document.getElementById('btnDisconnect')?.addEventListener('click', disconnectSerial);
+                document.getElementById('btnDemo')?.addEventListener('click', () => {
+                    startDemo();
+                    const btnDemo = document.getElementById('btnDemo');
+                    const btnStop = document.getElementById('btnStop');
+                    if (btnDemo) { btnDemo.disabled = true; btnDemo.classList.add('disabled'); }
+                    if (btnStop) { btnStop.disabled = false; btnStop.classList.remove('disabled'); btnStop.classList.add('btn-danger'); btnStop.classList.remove('btn-outline-secondary'); }
+                });
+                document.getElementById('btnStop')?.addEventListener('click', () => {
+                    stopDemo();
+                    const btnDemo = document.getElementById('btnDemo');
+                    const btnStop = document.getElementById('btnStop');
+                    if (btnDemo) { btnDemo.disabled = false; btnDemo.classList.remove('disabled'); }
+                    if (btnStop) { btnStop.disabled = true; btnStop.classList.add('disabled'); btnStop.classList.remove('btn-danger'); btnStop.classList.add('btn-outline-secondary'); }
+                });
+                // Keep demo buttons accessible via navbar, or call startDemo() manually if needed
                 document.getElementById('btnSeed')?.addEventListener('click', () => {
                     for (let i = 0; i < 8; i++) addPoint();
                 });
@@ -247,20 +429,74 @@
                 window.startDemoPressure = startDemo;
                 window.stopDemoPressure = stopDemo;
 
+                // Stats calculation and CSV export
+                function calculateStats() {
+                    const arr = data.datasets[0].data;
+                    if (!arr.length) return { min: null, max: null, avg: null };
+                    let min = Infinity, max = -Infinity, sum = 0;
+                    for (let i = 0; i < arr.length; i++) {
+                        const v = Number(arr[i]);
+                        if (Number.isFinite(v)) {
+                            if (v < min) min = v;
+                            if (v > max) max = v;
+                            sum += v;
+                        }
+                    }
+                    const avg = sum / arr.length;
+                    return { min, max, avg };
+                }
+
+                function updateStats() {
+                    const { min, max, avg } = calculateStats();
+                    const elMin = document.getElementById('statMin');
+                    const elMax = document.getElementById('statMax');
+                    const elAvg = document.getElementById('statAvg');
+                    if (elMin) elMin.textContent = (min == null ? '–' : min.toFixed(2));
+                    if (elMax) elMax.textContent = (max == null ? '–' : max.toFixed(2));
+                    if (elAvg) elAvg.textContent = (avg == null ? '–' : avg.toFixed(2));
+                }
+
+                function exportCsv() {
+                    const rows = [['time','pressure']];
+                    const labels = data.labels;
+                    const values = data.datasets[0].data;
+                    for (let i = 0; i < values.length; i++) {
+                        rows.push([labels[i] ?? '', String(values[i])]);
+                    }
+                    const csvContent = rows.map(r => r.map(field => {
+                        const s = String(field);
+                        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+                    }).join(',')).join('\n');
+                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    const ts = new Date().toISOString().replace(/[:.]/g,'-');
+                    a.download = `pressure-data-${ts}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }
+
+                document.getElementById('btnExportCsv')?.addEventListener('click', exportCsv);
+                // initial stats render
+                updateStats();
+
                 // Update connection badge
                 const badge = document.getElementById('connStatus');
-                const updateBadge = () => {
+                const updateBadge = (connected) => {
                     if (!badge) return;
-                    if (timer) {
+                    if (connected) {
                         badge.className = 'badge text-bg-success';
                         badge.textContent = 'Connected';
                     } else {
                         badge.className = 'badge text-bg-secondary';
-                        badge.textContent = 'Idle';
+                        badge.textContent = 'Disconnected';
                     }
                 };
-                document.getElementById('btnConnect')?.addEventListener('click', updateBadge);
-                document.getElementById('btnDisconnect')?.addEventListener('click', updateBadge);
+                document.getElementById('btnConnect')?.addEventListener('click', () => updateBadge(true));
+                document.getElementById('btnDisconnect')?.addEventListener('click', () => updateBadge(false));
                 // Initialize button states based on timer
                 (function initButtons(){
                     const btnC = document.getElementById('btnConnect');
@@ -283,8 +519,15 @@
                         btnSeed.classList.add(timer ? 'btn-outline-secondary' : 'btn-outline-primary');
                     }
                 })();
-                updateBadge();
+                updateBadge(false);
             })();
+            // Suppress unhandled promise rejections from stream teardown during disconnect
+            window.addEventListener('unhandledrejection', (event) => {
+                // Prevent default error logging
+                try { event.preventDefault(); } catch {}
+                // Optional debug output
+                try { console.debug('Suppressed unhandled promise', event.reason); } catch {}
+            });
         </script>
     </body>
 </html>
