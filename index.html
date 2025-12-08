@@ -58,7 +58,11 @@
                                 </div>
                                 <div class="d-flex align-items-center justify-content-between">
                                     <span class="fw-semibold">Rate</span>
-                                    <span class="text-muted">1 point/sec</span>
+                                    <span id="rateText" class="text-muted">5 points/sec</span>
+                                </div>
+                                <div class="mt-2">
+                                    <label for="rateSlider" class="form-label mb-1">Adjust rate (pts/sec)</label>
+                                    <input id="rateSlider" type="range" class="form-range" min="1" max="10" step="1" value="5">
                                 </div>
                                 <div class="d-flex align-items-center justify-content-between">
                                     <span class="fw-semibold">Window</span>
@@ -131,6 +135,7 @@
                 let timer = null;
                 let t0 = Date.now();
                 const maxPoints = 50;
+                let pointsPerSecond = 5; // default
                 const randPsi = (prev) => {
                     const base = prev ?? 32;
                     const jitter = (Math.random() - 0.5) * 2.0; // ±1.0
@@ -157,10 +162,11 @@
                 function startDemo() {
                     if (timer) return;
                     t0 = Date.now();
-                    timer = setInterval(addPoint, 1000);
+                    timer = setInterval(addPoint, Math.max(50, Math.floor(1000 / pointsPerSecond)));
                     // Disable/enable buttons on connect and style Disconnect green
                     const btnC = document.getElementById('btnConnect');
                     const btnD = document.getElementById('btnDisconnect');
+                    const btnSeed = document.getElementById('btnSeed');
                     if (btnC) {
                         btnC.disabled = true;
                         btnC.classList.add('disabled');
@@ -173,6 +179,12 @@
                         btnD.classList.remove('disabled', 'btn-outline-secondary');
                         btnD.classList.add('btn-success');
                     }
+                    if (btnSeed) {
+                        btnSeed.disabled = true;
+                        btnSeed.classList.add('disabled');
+                        btnSeed.classList.remove('btn-outline-primary');
+                        btnSeed.classList.add('btn-outline-secondary');
+                    }
                 }
 
                 function stopDemo() {
@@ -182,6 +194,7 @@
                     // Re-enable/disable buttons on disconnect and restore Disconnect style
                     const btnC = document.getElementById('btnConnect');
                     const btnD = document.getElementById('btnDisconnect');
+                    const btnSeed = document.getElementById('btnSeed');
                     if (btnC) {
                         btnC.disabled = false;
                         btnC.classList.remove('disabled');
@@ -195,6 +208,12 @@
                         btnD.classList.remove('btn-success');
                         btnD.classList.add('btn-outline-secondary');
                     }
+                    if (btnSeed) {
+                        btnSeed.disabled = false;
+                        btnSeed.classList.remove('disabled');
+                        btnSeed.classList.remove('btn-outline-secondary');
+                        btnSeed.classList.add('btn-outline-primary');
+                    }
                 }
 
                 // Hook up buttons
@@ -202,6 +221,19 @@
                 document.getElementById('btnDisconnect')?.addEventListener('click', stopDemo);
                 document.getElementById('btnSeed')?.addEventListener('click', () => {
                     for (let i = 0; i < 8; i++) addPoint();
+                });
+                // Rate slider control
+                const rateSlider = document.getElementById('rateSlider');
+                const rateText = document.getElementById('rateText');
+                rateSlider?.addEventListener('input', (e) => {
+                    const val = Number(rateSlider.value);
+                    pointsPerSecond = Math.min(10, Math.max(1, val));
+                    if (rateText) rateText.textContent = `${pointsPerSecond} points/sec`;
+                    // If running, restart timer with new rate
+                    if (timer) {
+                        clearInterval(timer);
+                        timer = setInterval(addPoint, Math.max(50, Math.floor(1000 / pointsPerSecond)));
+                    }
                 });
 
                 // Seed with a few points
@@ -230,6 +262,7 @@
                 (function initButtons(){
                     const btnC = document.getElementById('btnConnect');
                     const btnD = document.getElementById('btnDisconnect');
+                    const btnSeed = document.getElementById('btnSeed');
                     if (btnC) btnC.disabled = !!timer;
                     if (btnC) {
                         btnC.classList.remove('btn-success', 'btn-secondary');
@@ -240,6 +273,11 @@
                         // Style based on connection state
                         btnD.classList.remove('btn-success', 'btn-outline-secondary');
                         btnD.classList.add(timer ? 'btn-success' : 'btn-outline-secondary');
+                    }
+                    if (btnSeed) {
+                        btnSeed.disabled = !!timer;
+                        btnSeed.classList.remove('btn-outline-primary', 'btn-outline-secondary');
+                        btnSeed.classList.add(timer ? 'btn-outline-secondary' : 'btn-outline-primary');
                     }
                 })();
                 updateBadge();
