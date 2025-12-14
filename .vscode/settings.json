@@ -1,0 +1,10 @@
+{
+    "liveServer.settings.port": 4000,
+    "liveServer.settings.ChromeDebuggingAttachment": true,
+    "liveServer.settings.https": {
+        "enable": false,
+        "cert": "C:/Projects/html/pressure/localhost.crt",
+        "key": "C:/Projects/html/pressure/localhost.key",
+        "passphrase": ""
+    }
+}
