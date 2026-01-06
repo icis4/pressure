@@ -6,5 +6,6 @@
         "cert": "C:/Projects/html/pressure/localhost.crt",
         "key": "C:/Projects/html/pressure/localhost.key",
         "passphrase": ""
-    }
+    },
+    "iis.configDir": ""
 }

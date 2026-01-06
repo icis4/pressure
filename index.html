@@ -33,6 +33,7 @@
                     </ul>
                     <div class="d-flex">
                         <button class="btn btn-outline-light btn-sm" onclick="window.location.reload()">Refresh</button>
+                        <button id="btnHelp" class="btn btn-outline-info btn-sm ms-2">Help</button>
                     </div>
                 </div>
             </div>
@@ -107,10 +108,82 @@
                 </div>
             </div>
         </div>
+        <!-- Help Modal -->
+        <div class="modal fade" id="helpModal" tabindex="-1" aria-labelledby="helpModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-xl modal-dialog-scrollable">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="helpModalLabel">Help / README</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div class="btn-group btn-group-sm" role="group" aria-label="Help content tabs">
+                                <button type="button" id="helpTabReadme" class="btn btn-primary">README</button>
+                                <button type="button" id="helpTabLicense" class="btn btn-outline-primary">LICENSE</button>
+                            </div>
+                        </div>
+                        <div id="helpContent" class="markdown-body">
+                            <div class="text-muted small">Loading…</div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <small class="text-muted me-auto">Licensed under MPL-2.0 — see <a href="LICENSE" target="_blank">LICENSE</a>.</small>
+                        <a href="README.md" target="_blank" class="btn btn-link">Open raw README</a>
+                        <a href="LICENSE" target="_blank" class="btn btn-link">Open LICENSE</a>
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Bootstrap JS (includes Popper) -->
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
         <!-- Chart.js -->
         <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+        <!-- Markdown renderer -->
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <!-- MelexisIO Web Serial (optional direct usage) -->
+        <script type="module">
+            import { MelexisIOcomm } from './js/MelexisIO.js';
+            // Simple test harness to exercise Web Serial via the Connect button
+            // Use no filters for now; chooser will list all serial-capable ports
+            const io = new MelexisIOcomm({ baudRate: 921600, dataBits: 7, stopBits: 2, parity: 'odd' });
+            window.__mlxio = io;
+            const btn = document.getElementById('btnConnect');
+            const btnD = document.getElementById('btnDisconnect');
+            const idnEl = document.getElementById('idnInfo');
+            if (btn && btnD) {
+                btn.addEventListener('click', async () => {
+                    try {
+                        await io.open(false, true);
+                        if (idnEl) idnEl.textContent = io.id || '(OK)';
+                    } catch (e) {
+                        // If user canceled or filters hid the port, retry without filters
+                        if (String(e?.name) === 'NotFoundError') {
+                            try {
+                                // Retry once more (still no filters); show friendly message if canceled
+                                const ioNoFilter = new MelexisIOcomm({ baudRate: 921600, dataBits: 7, stopBits: 2, parity: 'odd' });
+                                await ioNoFilter.open(false, true);
+                                window.__mlxio = ioNoFilter;
+                                if (idnEl) idnEl.textContent = ioNoFilter.id || '(OK)';
+                            } catch (e2) {
+                                console.error('Retry without filters failed', e2);
+                                // Surface a friendly message only if user canceled again
+                                if (String(e2?.name) === 'NotFoundError') {
+                                    alert('No serial port selected. Please pick the Melexis board in the chooser.');
+                                }
+                            }
+                        } else {
+                            console.error(e);
+                        }
+                    }
+                });
+                btnD.addEventListener('click', async () => {
+                    try { await io.close(); if (idnEl) idnEl.textContent = ''; } catch {}
+                });
+            }
+        </script>
         <script>
             (function () {
                 const ctx = document.getElementById('pressureChart');
@@ -212,7 +285,8 @@
                         // Always request a port fresh and open it
                         port = await navigator.serial.requestPort();
                         await new Promise(r => setTimeout(r, 150));
-                        await port.open({ baudRate: 9600 });
+                        // Match MelexisIO defaults (can be adjusted if device requires 9600)
+                        await port.open({ baudRate: 921600, dataBits: 7, stopBits: 2, parity: 'odd' });
                         const textDecoder = new TextDecoderStream();
                         port.readable.pipeTo(textDecoder.writable);
                         inputStream = textDecoder.readable;
@@ -517,6 +591,101 @@
                     }
                 })();
                 updateBadge(false);
+
+                // Help modal logic
+                const helpBtn = document.getElementById('btnHelp');
+                const helpModalEl = document.getElementById('helpModal');
+                const helpContent = document.getElementById('helpContent');
+                const tabReadmeEl = document.getElementById('helpTabReadme');
+                const tabLicenseEl = document.getElementById('helpTabLicense');
+                let readmeLoaded = false;
+                let licenseLoaded = false;
+                let readmeHtml = null;
+                let licenseHtml = null;
+                let helpModalInstance = null;
+
+                function setActiveTab(which) {
+                    if (tabReadmeEl && tabLicenseEl) {
+                        if (which === 'readme') {
+                            tabReadmeEl.classList.remove('btn-outline-primary');
+                            tabReadmeEl.classList.add('btn-primary');
+                            tabLicenseEl.classList.remove('btn-primary');
+                            tabLicenseEl.classList.add('btn-outline-primary');
+                        } else {
+                            tabLicenseEl.classList.remove('btn-outline-primary');
+                            tabLicenseEl.classList.add('btn-primary');
+                            tabReadmeEl.classList.remove('btn-primary');
+                            tabReadmeEl.classList.add('btn-outline-primary');
+                        }
+                    }
+                }
+
+                function escapeHtml(s) {
+                    return s.replace(/[&<>"']/g, (ch) => ({
+                        '&': '&amp;',
+                        '<': '&lt;',
+                        '>': '&gt;',
+                        '"': '&quot;',
+                        "'": '&#39;'
+                    })[ch] || ch);
+                }
+
+                async function loadReadme() {
+                    setActiveTab('readme');
+                    if (!readmeLoaded) {
+                        helpContent.innerHTML = '<div class="text-muted small">Loading…</div>';
+                        try {
+                            const resp = await fetch('README.md', { cache: 'no-cache' });
+                            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                            const md = await resp.text();
+                            if (window.marked && typeof window.marked.parse === 'function') {
+                                readmeHtml = window.marked.parse(md);
+                            } else if (window.marked) {
+                                readmeHtml = window.marked(md);
+                            } else {
+                                readmeHtml = md.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                            }
+                            readmeLoaded = true;
+                        } catch (e) {
+                            readmeHtml = '<div class="text-danger">Failed to load README. Serve the app via http(s) (e.g., http://localhost) and try again.</div>';
+                        }
+                    }
+                    helpContent.innerHTML = readmeHtml || '';
+                }
+
+                async function loadLicense() {
+                    setActiveTab('license');
+                    if (!licenseLoaded) {
+                        helpContent.innerHTML = '<div class="text-muted small">Loading…</div>';
+                        try {
+                            const resp = await fetch('LICENSE', { cache: 'no-cache' });
+                            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                            const txt = await resp.text();
+                            licenseHtml = '<pre class="bg-light p-3 small" style="white-space: pre-wrap;">' + escapeHtml(txt) + '</pre>';
+                            licenseLoaded = true;
+                        } catch (e) {
+                            licenseHtml = '<div class="text-danger">Failed to load LICENSE. Serve the app via http(s) (e.g., http://localhost) and try again.</div>';
+                        }
+                    }
+                    helpContent.innerHTML = licenseHtml || '';
+                }
+
+                if (helpBtn && helpModalEl && helpContent) {
+                    helpBtn.addEventListener('click', async () => {
+                        try {
+                            if (!helpModalInstance) {
+                                helpModalInstance = new bootstrap.Modal(helpModalEl);
+                            }
+                            await loadReadme();
+                            helpModalInstance.show();
+                        } catch (e) {
+                            console.error('Help modal error', e);
+                            alert('Unable to open Help panel.');
+                        }
+                    });
+                    tabReadmeEl?.addEventListener('click', () => { loadReadme(); });
+                    tabLicenseEl?.addEventListener('click', () => { loadLicense(); });
+                }
             })();
             // Suppress unhandled promise rejections from stream teardown during disconnect
             window.addEventListener('unhandledrejection', (event) => {
