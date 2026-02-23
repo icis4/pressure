@@ -155,47 +155,6 @@
                 });
             }
         </script>
-        <!-- MelexisIO Web Serial (optional direct usage) -->
-        <script type="module">
-            import { MelexisIOcomm } from './js/MelexisIO.js';
-            // Simple test harness to exercise Web Serial via the Connect button
-            // Use no filters for now; chooser will list all serial-capable ports
-            const io = new MelexisIOcomm({ baudRate: 921600, dataBits: 7, stopBits: 2, parity: 'odd' });
-            window.__mlxio = io;
-            const btn = document.getElementById('btnConnect');
-            const btnD = document.getElementById('btnDisconnect');
-            const idnEl = document.getElementById('idnInfo');
-            if (btn && btnD) {
-                btn.addEventListener('click', async () => {
-                    try {
-                        await io.open(false, true);
-                        if (idnEl) idnEl.textContent = io.id || '(OK)';
-                    } catch (e) {
-                        // If user canceled or filters hid the port, retry without filters
-                        if (String(e?.name) === 'NotFoundError') {
-                            try {
-                                // Retry once more (still no filters); show friendly message if canceled
-                                const ioNoFilter = new MelexisIOcomm({ baudRate: 921600, dataBits: 7, stopBits: 2, parity: 'odd' });
-                                await ioNoFilter.open(false, true);
-                                window.__mlxio = ioNoFilter;
-                                if (idnEl) idnEl.textContent = ioNoFilter.id || '(OK)';
-                            } catch (e2) {
-                                console.error('Retry without filters failed', e2);
-                                // Surface a friendly message only if user canceled again
-                                if (String(e2?.name) === 'NotFoundError') {
-                                    alert('No serial port selected. Please pick the Melexis board in the chooser.');
-                                }
-                            }
-                        } else {
-                            console.error(e);
-                        }
-                    }
-                });
-                btnD.addEventListener('click', async () => {
-                    try { await io.close(); if (idnEl) idnEl.textContent = ''; } catch {}
-                });
-            }
-        </script>
         <script>
             (function () {
                 const ctx = document.getElementById('pressureChart');
@@ -308,8 +267,10 @@
                         // UI state
                         const btnC = document.getElementById('btnConnect');
                         const btnD = document.getElementById('btnDisconnect');
+                        const badge = document.getElementById('connStatus');
                         if (btnC) { btnC.disabled = true; btnC.classList.add('disabled'); btnC.classList.remove('btn-success'); btnC.classList.add('btn-secondary'); }
                         if (btnD) { btnD.disabled = false; btnD.classList.remove('disabled', 'btn-outline-secondary'); btnD.classList.add('btn-success'); }
+                        if (badge) { badge.className = 'badge text-bg-success'; badge.textContent = 'Connected'; }
                         // Query ID and show it next to Disconnect BEFORE starting background read loop
                         try {
                             const lines = await scpi_command('*IDN?', { timeoutMs: 5000, idleMs: 500, terminatorRegex: /\s*\)>/ });
@@ -353,6 +314,13 @@
                             }
                         })().catch(() => {});
                     } catch (err) {
+                        const errName = String(err?.name || '');
+                        // User canceled chooser or another requestPort prompt is already active.
+                        // Do not show failure alerts in these expected cases.
+                        if (errName === 'NotFoundError' || errName === 'InvalidStateError') {
+                            console.debug('Serial port selection canceled or already in progress', err);
+                            return;
+                        }
                         console.error('Serial connect error', err);
                         alert('Failed to connect to serial device.');
                     }
@@ -376,9 +344,11 @@
                         const btnC = document.getElementById('btnConnect');
                         const btnD = document.getElementById('btnDisconnect');
                         const idn = document.getElementById('idnInfo');
+                        const badge = document.getElementById('connStatus');
                         if (btnC) { btnC.disabled = false; btnC.classList.remove('disabled', 'btn-secondary'); btnC.classList.add('btn-success'); }
                         if (btnD) { btnD.disabled = true; btnD.classList.add('disabled'); btnD.classList.remove('btn-success'); btnD.classList.add('btn-outline-secondary'); }
                         if (idn) { idn.textContent = ''; }
+                        if (badge) { badge.className = 'badge text-bg-secondary'; badge.textContent = 'Disconnected'; }
                     }
                 }
 
@@ -578,8 +548,6 @@
                         badge.textContent = 'Disconnected';
                     }
                 };
-                document.getElementById('btnConnect')?.addEventListener('click', () => updateBadge(true));
-                document.getElementById('btnDisconnect')?.addEventListener('click', () => updateBadge(false));
                 // Initialize button states based on timer
                 (function initButtons(){
                     const btnC = document.getElementById('btnConnect');

@@ -1,5 +1,5 @@
 /* Service Worker for offline support */
-const CACHE_NAME = 'pressure-cache-v2';
+const CACHE_NAME = 'pressure-cache-v3';
 const CORE_ASSETS = [
   './index.html',
   './README.md',
