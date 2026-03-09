@@ -1,11 +1,14 @@
 /* Service Worker for offline support */
-const CACHE_NAME = 'pressure-cache-v3';
+const CACHE_NAME = 'pressure-cache-v16';
 const CORE_ASSETS = [
   './index.html',
   './README.md',
   './LICENSE',
   './manifest.webmanifest',
   './img/favicon.png',
+  './img/icon-192.png',
+  './img/icon-512.png',
+  './img/icon-maskable-512.png',
   './js/MelexisIO.js',
   './js/mlx90835_i2c.js',
   './js/mlx90835_spi.js',
@@ -45,7 +48,24 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return; // only cache GETs
   event.respondWith(
     (async () => {
-      // Cache-first strategy
+      const url = new URL(req.url);
+      const isIndexHtml = url.pathname.endsWith('/index.html') || url.pathname === '/' || req.mode === 'navigate';
+
+      // Network-first for navigations/index.html to avoid serving stale UI code.
+      if (isIndexHtml) {
+        try {
+          const res = await fetch(req);
+          const cache = await caches.open(CACHE_NAME);
+          cache.put(req, res.clone());
+          return res;
+        } catch (err) {
+          const fallback = await caches.match('./index.html');
+          if (fallback) return fallback;
+          return new Response('Offline', { status: 503, statusText: 'Offline' });
+        }
+      }
+
+      // Cache-first strategy for everything else
       const cached = await caches.match(req, { ignoreSearch: true });
       if (cached) return cached;
       try {
@@ -55,13 +75,7 @@ self.addEventListener('fetch', (event) => {
         cache.put(req, res.clone());
         return res;
       } catch (err) {
-        // Offline fallback: serve index for navigation requests
-        if (req.mode === 'navigate') {
-          const fallback = await caches.match('./index.html');
-          if (fallback) return fallback;
-        }
         // If README/LICENSE requested and not cached, return minimal message
-        const url = new URL(req.url);
         if (url.pathname.endsWith('/README.md') || url.pathname.endsWith('/LICENSE')) {
           return new Response('Offline: asset not cached yet. Please visit online once.', {
             status: 200,
