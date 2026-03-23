@@ -25,7 +25,7 @@
         <!-- Navbar -->
         <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
             <div class="container">
-                <a class="navbar-brand" href="#">Pressure-2</a>
+                <a class="navbar-brand" href="#">Pressure</a>
                 <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
                     <span class="navbar-toggler-icon"></span>
                 </button>
@@ -103,7 +103,7 @@
                                 </div>
                                 <!-- Removed panel Connect/Disconnect; using top buttons -->
                                 <div class="mt-2 d-flex gap-2">
-                                    <button id="btnDemo" class="btn btn-primary btn-sm">Demo</button>
+                                    <button id="btnDemo" class="btn btn-primary btn-sm">Start</button>
                                     <button id="btnStop" class="btn btn-outline-secondary btn-sm" disabled>Stop</button>
                                 </div>
                             </div>
@@ -221,8 +221,9 @@
                     console.warn('Chart.js not loaded; demo will run without rendering.');
                 }
 
-                // Demo data stream (fallback)
+                // Background sampling timer (used by Start/Stop)
                 let timer = null;
+                let timerCallback = null;
                 let t0 = Date.now();
                 const maxPoints = 50;
                 let pointsPerSecond = 5; // default
@@ -250,20 +251,183 @@
                     updateStats();
                 }
 
-                function startDemo() {
-                    if (timer) return;
-                    t0 = Date.now();
-                    timer = setInterval(addPoint, Math.max(50, Math.floor(1000 / pointsPerSecond)));
-                    // Demo controls only; do not touch Connect/Disconnect
-                    // Leave Seed enabled during demo
+                function intervalMsFromRate() {
+                    return Math.max(50, Math.floor(1000 / pointsPerSecond));
                 }
 
-                function stopDemo() {
+                function addPointValue(value) {
+                    const elapsed = Math.floor((Date.now() - t0) / 1000);
+                    const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+                    const ss = String(elapsed % 60).padStart(2, '0');
+                    const label = `${mm}:${ss}`;
+                    const arr = data.datasets[0].data;
+                    data.labels.push(label);
+                    arr.push(Number(value));
+                    if (arr.length > maxPoints) {
+                        data.labels.shift();
+                        arr.shift();
+                    }
+                    if (chart) chart.update('none');
+                    updateStats();
+                }
+
+                let isSpiConnected = false;
+                let spiPollInFlight = false;
+                const SPI_DATA_BYTES = 8;
+                const SPI_FRAME_BYTES = SPI_DATA_BYTES + 3; // ignored + data + status + crc
+                const buildSpiReadCommand = () => `:SPI:EXCH ${SPI_FRAME_BYTES},${hexByte(Mlx90835Command.READ_MEASUREMENT)}, 0`;
+                let spiReadCommand = ':SPI:EXCH';
+                let spiReadCommandProbed = false;
+
+                function parseSpiRead4Bytes(lines) {
+                    // Expected:
+                    // :SPI:EXCH N,<READ_MEASUREMENT>, 0
+                    // N = dataBytes + 3 (ignored + status + crc)
+                    // (OK)>
+                    // Byte layout: [ignored, data_msb, data_lsb, status, crc]
+                    const arr = Array.isArray(lines) ? lines : String(lines ?? '').split('\n');
+                    for (let i = 0; i < arr.length; i++) {
+                        const s = String(arr[i] ?? '').trim();
+                        if (!s) continue;
+                        if (s.includes('(OK)>')) continue;
+                        if (!s.includes(',')) continue;
+                        const parts = s.split(',').map(p => p.trim()).filter(Boolean);
+                        if (parts.length < SPI_FRAME_BYTES) continue;
+                        const bytes = [];
+                        for (let j = 0; j < parts.length && bytes.length < SPI_FRAME_BYTES; j++) {
+                            const token = parts[j];
+                            if (!/^(?:0x)?[0-9a-fA-F]{1,2}$/.test(token)) {
+                                bytes.length = 0;
+                                break;
+                            }
+                            const n = parseInt(token.replace(/^0x/i, ''), 16);
+                            if (!Number.isFinite(n) || n < 0 || n > 255) {
+                                bytes.length = 0;
+                                break;
+                            }
+                            bytes.push(n);
+                        }
+                        if (bytes.length === SPI_FRAME_BYTES) {
+                            const dataWord = ((bytes[1] & 0xFF) << 8) | (bytes[2] & 0xFF);
+                            const data = (dataWord & 0x8000) ? (dataWord - 0x10000) : dataWord;
+                            const status = bytes[3] & 0xFF;
+                            const crc = bytes[4] & 0xFF;
+                            return { data, status, crc, bytes };
+                        }
+                    }
+                    return null;
+                }
+
+                function parseByteTokens(lines) {
+                    const out = [];
+                    const arr = Array.isArray(lines) ? lines : String(lines ?? '').split('\n');
+                    for (let i = 0; i < arr.length; i++) {
+                        const s = String(arr[i] ?? '');
+                        if (!s) continue;
+                        if (s.includes('(OK)>')) continue;
+                        const matches = s.match(/0x[0-9a-fA-F]+|\b[0-9a-fA-F]{1,2}\b|\b\d+\b/g);
+                        if (!matches) continue;
+                        for (const m of matches) {
+                            const token = String(m);
+                            const n = token.toLowerCase().startsWith('0x')
+                                ? parseInt(token.replace(/^0x/i, ''), 16)
+                                : (/^[0-9a-fA-F]{2}$/.test(token) ? parseInt(token, 16) : parseInt(token, 10));
+                            if (Number.isFinite(n) && n >= 0 && n <= 255) out.push(n);
+                        }
+                    }
+                    return out;
+                }
+
+                async function pollSpiRead4AndPlot() {
+                    if (spiPollInFlight) return;
+                    if (!isSpiConnected) return;
+                    if (!port || !writer || !inputStream) return;
+                    spiPollInFlight = true;
+                    try {
+                        // Send with only '\n' terminator.
+                        // Some firmwares are case/colon sensitive; probe a few variants once and keep the first one that answers.
+                        const candidates = spiReadCommandProbed
+                            ? [spiReadCommand]
+                            : [buildSpiReadCommand()];
+
+                        let lines = null;
+                        let lastErr = null;
+                        try {
+                            for (let i = 0; i < candidates.length; i++) {
+                                const cmd = candidates[i];
+                                try {
+                                    lines = await scpi_command(':SPI:CS0 0;' + cmd + ';:SPI:CS0 1', { timeoutMs: 5000, idleMs: 250, allowIdleReturn: true });
+                                    spiReadCommand = cmd;
+                                    spiReadCommandProbed = true;
+                                    break;
+                                } catch (e) {
+                                    lastErr = e;
+                                    const msg = String(e?.message || e);
+                                    // If we got any response at all (e.g. (ERROR)>), stop probing and surface it.
+                                    if (!msg.includes('Timeout waiting for response')) {
+                                        spiReadCommand = cmd;
+                                        spiReadCommandProbed = true;
+                                        throw e;
+                                    }
+                                }
+                            }
+                        } finally {
+                            //await scpi_command(':SPI:CS0 1');
+                        }
+
+                        if (!lines) {
+                            throw lastErr || new Error('Timeout waiting for response');
+                        }
+
+                        const parsed = parseSpiRead4Bytes(lines);
+                        const bytes = parseByteTokens(lines).slice(0, SPI_FRAME_BYTES);
+                        const data = parsed
+                            ? parsed.data
+                            : (bytes.length === SPI_FRAME_BYTES
+                                ? ((((bytes[1] & 0xFF) << 8) | (bytes[2] & 0xFF)) & 0x8000)
+                                    ? (((bytes[1] & 0xFF) << 8) | (bytes[2] & 0xFF)) - 0x10000
+                                    : (((bytes[1] & 0xFF) << 8) | (bytes[2] & 0xFF))
+                                : null);
+                        const status = parsed
+                            ? parsed.status
+                            : (bytes.length === SPI_FRAME_BYTES ? (bytes[3] & 0xFF) : null);
+                        if (!Number.isFinite(data)) {
+                            debugPrint(`${spiReadCommand} returned ${bytes.length} byte(s): ${bytes.join(', ')}`);
+                            return;
+                        }
+                        if (Number.isFinite(status)) {
+                            setChipStatusDecoded('0x' + Number(status).toString(16).toUpperCase().padStart(2, '0'), status);
+                        }
+                        addPointValue(Number(data.toFixed(2)));
+                    } catch (e) {
+                        debugPrint(`${spiReadCommand} failed: ${String(e?.message || e)}`);
+                    } finally {
+                        spiPollInFlight = false;
+                    }
+                }
+
+                function startStream() {
+                    if (timer) return false;
+                    if (!port || !writer || !inputStream) {
+                        debugPrint('Start ignored: not connected');
+                        return false;
+                    }
+                    if (!isSpiConnected) {
+                        debugPrint('Start ignored: SPI not connected');
+                        return false;
+                    }
+                    t0 = Date.now();
+                    timerCallback = () => { void pollSpiRead4AndPlot(); };
+                    timer = setInterval(timerCallback, intervalMsFromRate());
+                    return true;
+                }
+
+                function stopStream() {
                     if (!timer) return;
                     clearInterval(timer);
                     timer = null;
-                    // Demo controls only; do not touch Connect/Disconnect
-                    // Leave Seed enabled during demo
+                    timerCallback = null;
+                    spiPollInFlight = false;
                 }
 
                 // USB CDC via Web Serial API
@@ -272,6 +436,9 @@
                 let writer = null;
                 let inputStream = null;
                 let connectInProgress = false;
+                let serialPumpTask = null;
+                let serialRxBuffer = '';
+                let serialWaiters = [];
 
                 const debugLogEl = () => document.getElementById('debugLog');
                 const debugBuffer = [];
@@ -326,12 +493,69 @@
                     }
                 }
 
+                function notifySerialWaiters() {
+                    if (!serialWaiters.length) return;
+                    const waiters = serialWaiters;
+                    serialWaiters = [];
+                    for (const resolve of waiters) resolve();
+                }
+
+                function waitForSerialData(timeoutMs = 25) {
+                    return new Promise((resolve) => {
+                        let finished = false;
+                        const done = () => {
+                            if (finished) return;
+                            finished = true;
+                            resolve();
+                        };
+                        serialWaiters.push(done);
+                        setTimeout(done, timeoutMs);
+                    });
+                }
+
+                function startSerialPump() {
+                    if (!inputStream || serialPumpTask) return;
+                    reader = inputStream.getReader();
+                    serialPumpTask = (async () => {
+                        try {
+                            while (port && reader) {
+                                const { value, done } = await reader.read();
+                                if (done) break;
+                                if (!value) continue;
+                                serialRxBuffer += value;
+                                notifySerialWaiters();
+                            }
+                        } catch (e) {
+                            // Ignore during disconnect/cancel.
+                        } finally {
+                            notifySerialWaiters();
+                            serialPumpTask = null;
+                        }
+                    })();
+                }
+
+                async function stopSerialPump() {
+                    if (reader) {
+                        try { await reader.cancel(); } catch {}
+                        try { reader.releaseLock(); } catch {}
+                        reader = null;
+                    }
+                    if (serialPumpTask) {
+                        try { await serialPumpTask; } catch {}
+                        serialPumpTask = null;
+                    }
+                    serialRxBuffer = '';
+                    notifySerialWaiters();
+                }
+
                 const I2CADDR = '0x33';
 
                 const SCPI_OK_DEFAULTS = Object.freeze({
                     timeoutMs: 5000,
                     idleMs: 300,
-                    terminatorRegex: /\(OK\)>/,
+                    // End-of-response prompt, e.g. "(OK)>", "(ERROR)>", "(SOME_CODE)>", or "(*)>".
+                    // Matches a whole line (optionally preceded by whitespace) to avoid false positives in payload.
+                    terminatorRegex: /^\s*\([A-Z0-9_*_]+\)>\s*$/,
                     allowIdleReturn: false,
                 });
 
@@ -568,6 +792,7 @@
                 function setSpiBadge(connected, detailText = '', disconnectedText = 'Not implemented yet') {
                     const el = document.getElementById('spiStatus');
                     if (!el) return;
+                    isSpiConnected = !!connected;
                     if (connected) {
                         el.className = 'badge text-bg-success';
                         el.textContent = detailText ? `Connected (${detailText})` : 'Connected';
@@ -577,21 +802,28 @@
                     }
                 }
 
+                async function setSpiContinuousMode(source = 'start') {
+                    await scpi_command(`:SPI:CS0 0;:SPI:EXCH 4, ${hexByte(Mlx90835Command.CLEAR_RESET_FLAG)};:SPI:CS0 1`);
+                    await scpi_command(`:SPI:CS0 0;:SPI:EXCH 4, ${hexByte(Mlx90835Command.CLEAR_ERROR_FLAGS)};:SPI:CS0 1`);
+                    await scpi_command(`:SPI:CS0 0;:SPI:EXCH 4, ${hexByte(Mlx90835Command.START_CONTINUOUS_MODE)};:SPI:CS0 1`);
+                    debugPrint(`SPI continuous mode requested (${source})`);
+                }
+
                 async function trySpiStatusByte() {
                     // :SPI:EXCH ... -> <number> + (OK)>
                     try {
                         // Best-effort: clear error + reset flags before reading status.
                         // Mirrors the Python examples: CLEAR_ERROR_FLAGS, CLEAR_RESET_FLAG, then status_check().
                         try {
-                            await scpi_command(`:SPI:EXCH 1, ${hexByte(Mlx90835Command.CLEAR_ERROR_FLAGS)}`);
-                            await scpi_command(`:SPI:EXCH 1, ${hexByte(Mlx90835Command.CLEAR_RESET_FLAG)}`);
+                            await scpi_command(`:SPI:CS0 0;:SPI:EXCH 3, ${hexByte(Mlx90835Command.CLEAR_ERROR_FLAGS)};:SPI:CS0 1`);
+                            await scpi_command(`:SPI:CS0 0;:SPI:EXCH 3, ${hexByte(Mlx90835Command.CLEAR_RESET_FLAG)};:SPI:CS0 1`);
                         } catch (e) {
                             // Non-fatal; continue with status read.
                             debugPrint(`SPI clear flags skipped: ${String(e?.message || e)}`);
                         }
 
                         const exchLines = await scpi_command(
-                            `:SPI:EXCH 1, ${hexByte(Mlx90835Command.READ_STATUS_BYTE)}`
+                            `:SPI:CS0 0;:SPI:EXCH 3, ${hexByte(Mlx90835Command.READ_STATUS_BYTE)};:SPI:CS0 1`
                         );
                         // If the EXCHANGE doesn't end with OK prompt, treat it as "not present".
                         if (!Array.isArray(exchLines) || !exchLines.some(l => String(l).includes('(OK)>'))) {
@@ -618,11 +850,11 @@
                         setChipStatusDecoded(hex, parsed & 0xFF);
                         setSpiBadge(true);
 
-                        // After status check, put device in Idle mode (best-effort).
+                        // After status check, put device in Continuous mode (best-effort).
                         try {
-                            await scpi_command(`:SPI:EXCH 1, ${hexByte(Mlx90835Command.START_IDLE_MODE)}`);
+                            await setSpiContinuousMode('connect');
                         } catch (e) {
-                            debugPrint(`SPI set idle skipped: ${String(e?.message || e)}`);
+                            debugPrint(`SPI set continuous mode skipped: ${String(e?.message || e)}`);
                         }
                         return { ok: true, notPresent: false };
                     } catch (e) {
@@ -641,6 +873,8 @@
                         setSpiBadge(false, '', 'Initializing…');
 
                         await scpi_command(':I2C:DEINIT');
+                        await scpi_command(':VDD:OFF');
+                        await scpi_command(':SPI:CS0 1');
                         await scpi_command(':SPI:INIT 2');
                         await scpi_command(':SPI:BUF 1,1,1,1,0');
                         await scpi_command(':VDD:3V3');
@@ -735,6 +969,7 @@
                         const textEncoder = new TextEncoderStream();
                         textEncoder.readable.pipeTo(port.writable);
                         writer = textEncoder.writable.getWriter();
+                        startSerialPump();
                         // UI state
                         const btnC = document.getElementById('btnConnect');
                         const btnD = document.getElementById('btnDisconnect');
@@ -757,40 +992,6 @@
                         if (i2c && i2c.notPresent) {
                             await startSpiFallback();
                         }
-
-                        // Start background read loop
-                        reader = inputStream.getReader();
-                        let buffer = '';
-                        (async () => {
-                            try {
-                                while (port && reader) {
-                                    const { value, done } = await reader.read();
-                                    if (done) break;
-                                    if (value) {
-                                        buffer += value;
-                                        let idx;
-                                        while ((idx = buffer.indexOf('\n')) >= 0) {
-                                            const line = buffer.slice(0, idx).trim();
-                                            buffer = buffer.slice(idx + 1);
-                                            if (line) {
-                                                const val = parseFloat(line);
-                                                const elapsed = Math.floor((Date.now() - t0) / 1000);
-                                                const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
-                                                const ss = String(elapsed % 60).padStart(2, '0');
-                                                const label = `${mm}:${ss}`;
-                                                data.labels.push(label);
-                                                data.datasets[0].data.push(isNaN(val) ? randPsi(data.datasets[0].data.at(-1)) : val);
-                                                if (data.datasets[0].data.length > maxPoints) { data.labels.shift(); data.datasets[0].data.shift(); }
-                                                if (chart) chart.update('none');
-                                                updateStats();
-                                            }
-                                        }
-                                    }
-                                }
-                            } catch (e) {
-                                // Swallow read errors during disconnect/cancel
-                            }
-                        })().catch(() => {});
                     } catch (err) {
                         const errName = String(err?.name || '');
                         // User canceled chooser or another requestPort prompt is already active.
@@ -821,7 +1022,8 @@
                 async function disconnectSerial() {
                     try {
                         debugPrint('--- DISCONNECT ---');
-                        if (reader) { await reader.cancel(); reader.releaseLock(); reader = null; }
+                        stopStream();
+                        await stopSerialPump();
                         if (writer) {
                             try { await writer.close(); } catch {}
                             try { writer.releaseLock(); } catch {}
@@ -863,139 +1065,131 @@
                         ? new RegExp(terminatorRegex.source, String(terminatorRegex.flags || '').replace('g', ''))
                         : null;
 
+                    const parseResponse = (text) => {
+                        let scan = 0;
+                        const parsedLines = [];
+
+                        while (true) {
+                            const idx = text.indexOf('\n', scan);
+                            if (idx < 0) break;
+                            const line = text.slice(scan, idx);
+                            parsedLines.push(String(line));
+                            if (termRe && termRe.test(String(line))) {
+                                return {
+                                    done: true,
+                                    lines: parsedLines,
+                                    raw: text.slice(0, idx + 1),
+                                    rest: text.slice(idx + 1),
+                                };
+                            }
+                            scan = idx + 1;
+                        }
+
+                        if (termRe) {
+                            const tail = scan < text.length ? text.slice(scan) : '';
+                            if (tail && termRe.test(String(tail))) {
+                                parsedLines.push(String(tail));
+                                return {
+                                    done: true,
+                                    lines: parsedLines,
+                                    raw: text,
+                                    rest: '',
+                                };
+                            }
+                        }
+
+                        if (scan > 0) {
+                            return {
+                                done: false,
+                                lines: parsedLines,
+                                partial: text.slice(scan),
+                                raw: text,
+                            };
+                        }
+
+                        return {
+                            done: false,
+                            lines: [],
+                            partial: text,
+                            raw: text,
+                        };
+                    };
+
                     debugTx(command);
-                    // Pause background reader if active to avoid stream contention
-                    let hadBackgroundReader = !!reader;
-                    if (reader) {
-                        try { await reader.cancel(); } catch {}
-                        try { reader.releaseLock(); } catch {}
-                        reader = null;
+                    if (serialRxBuffer.trim()) {
+                        debugPrint(`RX buffer reset before TX (${serialRxBuffer.length} chars discarded)`);
+                        serialRxBuffer = '';
                     }
 
-                    // Write command + newline
                     await writer.write(`${command}\n`);
 
-                    // Dedicated reader for response
-                    const tempReader = inputStream.getReader();
-                    let buffer = '';
                     let raw = '';
-                    const lines = [];
                     const start = Date.now();
                     let lastDataTs = Date.now();
 
-                    const flushBufferIntoLines = () => {
-                        if (!buffer) return;
-                        const parts = buffer.split('\n');
-                        buffer = '';
-                        for (let part of parts) {
-                            // Preserve exact characters; do not trim or drop empties.
-                            lines.push(String(part));
-                        }
-                    };
-                    try {
-                        while (Date.now() - start < timeoutMs) {
-                            const race = await Promise.race([
-                                tempReader.read(),
-                                new Promise(resolve => setTimeout(() => resolve({ value: null, done: false, idle: true }), 25))
-                            ]);
-                            const { value, done } = race;
-                            if (done) break;
-                            if (value) {
-                                raw += value;
-                                buffer += value;
-                                lastDataTs = Date.now();
+                    while (Date.now() - start < timeoutMs) {
+                        if (serialRxBuffer.length !== raw.length) {
+                            raw = serialRxBuffer;
+                            lastDataTs = Date.now();
 
-                                // Fast-path: terminator may arrive without a trailing newline.
-                                if (termRe && termRe.test(buffer)) {
-                                    flushBufferIntoLines();
-                                    lines.raw = raw;
-                                    debugRx(lines);
-                                    return lines;
-                                }
-
-                                let idx;
-                                while ((idx = buffer.indexOf('\n')) >= 0) {
-                                    const line = buffer.slice(0, idx);
-                                    buffer = buffer.slice(idx + 1);
-                                    lines.push(String(line));
-                                    if (termRe && termRe.test(String(line))) {
-                                        lines.raw = raw;
-                                        debugRx(lines);
-                                        return lines;
-                                    }
-                                }
-                            }
-                            // End if idle for idleMs
-                            if (allowIdleReturn && idleMs > 0 && Date.now() - lastDataTs >= idleMs && lines.length) {
-                                lines.raw = raw;
-                                debugRx(lines);
-                                return lines;
-                            }
-
-                            // If we have partial data but no newline, allow idle-return to flush it.
-                            if (allowIdleReturn && idleMs > 0 && Date.now() - lastDataTs >= idleMs && !lines.length && buffer.length) {
-                                flushBufferIntoLines();
-                                lines.raw = raw;
-                                debugRx(lines);
-                                return lines;
+                            const parsed = parseResponse(raw);
+                            if (parsed.done) {
+                                serialRxBuffer = parsed.rest;
+                                parsed.lines.raw = parsed.raw;
+                                debugRx(parsed.lines);
+                                return parsed.lines;
                             }
                         }
-                        // If buffer has remaining content, flush last line
-                        flushBufferIntoLines();
-                        if (lines.length) {
-                            lines.raw = raw;
-                            debugRx(lines);
-                            return lines;
+
+                        if (allowIdleReturn && idleMs > 0 && Date.now() - lastDataTs >= idleMs && raw.length) {
+                            const parsed = parseResponse(raw);
+                            const idleLines = parsed.lines.slice();
+                            if (parsed.partial) idleLines.push(String(parsed.partial));
+                            serialRxBuffer = '';
+                            idleLines.raw = raw;
+                            debugRx(idleLines);
+                            return idleLines;
                         }
-                        throw new Error('Timeout waiting for response');
-                    } finally {
-                        try { tempReader.releaseLock(); } catch {}
-                        // Resume background reader if it was active, without chart/demo updates
-                        if (hadBackgroundReader && port) {
-                            try {
-                                reader = inputStream.getReader();
-                                (async () => {
-                                    try {
-                                        let bufferBg = '';
-                                        while (port && reader) {
-                                            const { value, done } = await reader.read();
-                                            if (done) break;
-                                            if (value) {
-                                                bufferBg += value;
-                                                let idx;
-                                                // Consume lines silently to keep stream flowing
-                                                while ((idx = bufferBg.indexOf('\n')) >= 0) {
-                                                    bufferBg = bufferBg.slice(idx + 1);
-                                                }
-                                            }
-                                        }
-                                    } catch (e) {
-                                        // Ignore during disconnect/cancel
-                                    }
-                                })().catch(() => {});
-                            } catch {}
-                        }
+
+                        await waitForSerialData(25);
                     }
+
+                    if (raw && String(raw).length) {
+                        const rawText = String(raw);
+                        debugPrint(`RX (partial, ${rawText.length} chars): ${rawText.slice(0, 200)}`);
+                        throw new Error(`Timeout waiting for response (received ${rawText.length} chars)`);
+                    }
+
+                    throw new Error('Timeout waiting for response');
                 }
 
                 // Hook up buttons (top bar)
                 document.getElementById('btnConnect')?.addEventListener('click', connectSerial);
                 document.getElementById('btnDisconnect')?.addEventListener('click', disconnectSerial);
-                document.getElementById('btnDemo')?.addEventListener('click', () => {
-                    startDemo();
+                document.getElementById('btnDemo')?.addEventListener('click', async () => {
+                    if (port && writer && inputStream && isSpiConnected) {
+                        try {
+                            await setSpiContinuousMode('start');
+                        } catch (e) {
+                            debugPrint(`SPI set continuous mode failed: ${String(e?.message || e)}`);
+                            return;
+                        }
+                    }
+                    const started = startStream();
+                    if (!started) return;
                     const btnDemo = document.getElementById('btnDemo');
                     const btnStop = document.getElementById('btnStop');
                     if (btnDemo) { btnDemo.disabled = true; btnDemo.classList.add('disabled'); }
                     if (btnStop) { btnStop.disabled = false; btnStop.classList.remove('disabled'); btnStop.classList.add('btn-danger'); btnStop.classList.remove('btn-outline-secondary'); }
                 });
                 document.getElementById('btnStop')?.addEventListener('click', () => {
-                    stopDemo();
+                    stopStream();
                     const btnDemo = document.getElementById('btnDemo');
                     const btnStop = document.getElementById('btnStop');
                     if (btnDemo) { btnDemo.disabled = false; btnDemo.classList.remove('disabled'); }
                     if (btnStop) { btnStop.disabled = true; btnStop.classList.add('disabled'); btnStop.classList.remove('btn-danger'); btnStop.classList.add('btn-outline-secondary'); }
                 });
-                // Keep demo buttons accessible via navbar, or call startDemo() manually if needed
+                // Start/Stop controls
                 document.getElementById('btnSeed')?.addEventListener('click', () => {
                     for (let i = 0; i < 8; i++) addPoint();
                 });
@@ -1009,7 +1203,7 @@
                     // If running, restart timer with new rate
                     if (timer) {
                         clearInterval(timer);
-                        timer = setInterval(addPoint, Math.max(50, Math.floor(1000 / pointsPerSecond)));
+                        timer = setInterval(timerCallback || (() => {}), intervalMsFromRate());
                     }
                 });
 
@@ -1018,8 +1212,8 @@
 
                 // Expose for future updates
                 window.pressureChart = chart;
-                window.startDemoPressure = startDemo;
-                window.stopDemoPressure = stopDemo;
+                window.startDemoPressure = startStream;
+                window.stopDemoPressure = stopStream;
                 window.crc8CCIT = crc8CCIT;
 
                 // Stats calculation and CSV export
